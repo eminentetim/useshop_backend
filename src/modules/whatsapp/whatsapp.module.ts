@@ -6,9 +6,10 @@ import { UsersModule } from '../users/users.module';
 import { WalletsModule } from '../wallets/wallets.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { AiModule } from '../ai/ai.module';
+import { OrdersModule } from '../orders/orders.module';
 
 @Module({
-  imports: [HttpModule, UsersModule, WalletsModule, PaymentsModule, AiModule],
+  imports: [HttpModule, UsersModule, WalletsModule, PaymentsModule, AiModule, OrdersModule],
   controllers: [WhatsappController],
   providers: [WhatsappService],
 })
