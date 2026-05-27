@@ -21,5 +21,75 @@ services:
     ports:
       - '6379:6379'
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: useshop_rabbitmq
+    restart: always
+    ports:
+      - '5672:5672'   # AMQP
+      - '15672:15672' # Management UI (http://localhost:15672)
+    environment:
+      RABBITMQ_DEFAULT_USER: useshop
+      RABBITMQ_DEFAULT_PASS: useshop_rabbitmq_password
+      RABBITMQ_DEFAULT_VHOST: useshop
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: useshop_backend
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - DATABASE_HOST=db
+      - DATABASE_PORT=5432
+      - DATABASE_USER=useshop_user
+      - DATABASE_PASSWORD=useshop_password
+      - DATABASE_NAME=useshop_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_URI=amqp://useshop:useshop_rabbitmq_password@rabbitmq:5672/useshop
+      - PORT=3000
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Next.js Dashboard
+  dashboard:
+    build:
+      context: ../useshop_dashboard
+      dockerfile: Dockerfile
+    container_name: useshop_dashboard
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=production
+      - BACKEND_URL=http://backend:3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  rabbitmq_data:

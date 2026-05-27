@@ -1,12 +1,62 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { OrdersService } from './orders.service';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Order } from './entities/order.entity';
+import { DataSource } from 'typeorm';
+import { UsersService } from '../users/users.service';
+import { CheckoutSessionService } from '../checkout/checkout-session.service';
+import { WalletLedgerService } from '../wallets/wallet-ledger.service';
+import { ConfigService } from '@nestjs/config';
+import { FraudCheckService } from '../ai/fraud-check.service';
+import { EscalationService } from '../escalations/escalation.service';
+import { PaymentsService } from '../payments/payments.service';
+import { MessagingService } from '../messaging/messaging.service';
 
-describe('OrdersService', () => {
+describe('OrdersService - Refund Logic', () => {
   let service: OrdersService;
+
+  const mockOrderRepo = {
+    findOne: jest.fn(),
+    save: jest.fn(),
+    createQueryBuilder: jest.fn(() => ({
+      leftJoinAndSelect: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue([]),
+    })),
+  };
+
+  const mockDataSource = {
+    createQueryRunner: jest.fn(() => ({
+      connect: jest.fn(),
+      startTransaction: jest.fn(),
+      manager: {
+        findOne: jest.fn(),
+        save: jest.fn(),
+        create: jest.fn(),
+      },
+      commitTransaction: jest.fn(),
+      rollbackTransaction: jest.fn(),
+      release: jest.fn(),
+    })),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      providers: [OrdersService],
+      providers: [
+        OrdersService,
+        { provide: getRepositoryToken(Order), useValue: mockOrderRepo },
+        { provide: DataSource, useValue: mockDataSource },
+        { provide: UsersService, useValue: { findOrCreateByPhoneNumber: jest.fn() } },
+        { provide: CheckoutSessionService, useValue: {} },
+        { provide: WalletLedgerService, useValue: { recordEntry: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn((k, d) => d) } },
+        { provide: FraudCheckService, useValue: { isPhoneBlocked: jest.fn().mockResolvedValue(false), getRecentChecks: jest.fn().mockResolvedValue([]) } },
+        { provide: EscalationService, useValue: { createEscalation: jest.fn() } },
+        { provide: PaymentsService, useValue: { initiateMonnifyDisbursement: jest.fn() } },
+        { provide: MessagingService, useValue: { publishOrderRefunded: jest.fn() } },
+      ],
     }).compile();
 
     service = module.get<OrdersService>(OrdersService);
@@ -14,5 +64,16 @@ describe('OrdersService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  it('refundToWallet should reject already refunded orders', async () => {
+    mockOrderRepo.findOne.mockResolvedValue({ status: 'REFUNDED', user: { phoneNumber: '123' } });
+    const result = await service.refundToWallet('some-id');
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('already been refunded');
+  });
+
+  it('should have refundToBank method defined', () => {
+    expect(typeof service.refundToBank).toBe('function');
   });
 });

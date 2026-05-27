@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { User } from './modules/users/entities/user.entity';
 import { Wallet } from './modules/wallets/entities/wallet.entity';
 import { Transaction } from './modules/wallets/entities/transaction.entity';
+import { WalletLedger } from './modules/wallets/entities/wallet-ledger.entity';
 import { Order } from './modules/orders/entities/order.entity';
 import { UsersModule } from './modules/users/users.module';
 import { WalletsModule } from './modules/wallets/wallets.module';
@@ -14,6 +15,11 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { AiModule } from './modules/ai/ai.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { FulfillmentModule } from './modules/fulfillment/fulfillment.module';
+import { CartModule } from './modules/cart/cart.module';
+import { CheckoutSessionModule } from './modules/checkout/checkout-session.module';
+import { MessagingModule } from './modules/messaging/messaging.module';
+import { EscalationsModule } from './modules/escalations/escalations.module';
+import { ScheduledModule } from './modules/scheduled/scheduled.module';
 
 @Module({
   imports: [
@@ -29,7 +35,7 @@ import { FulfillmentModule } from './modules/fulfillment/fulfillment.module';
         username: configService.get<string>('DATABASE_USER'),
         password: configService.get<string>('DATABASE_PASSWORD'),
         database: configService.get<string>('DATABASE_NAME'),
-        entities: [User, Wallet, Transaction, Order],
+        entities: [User, Wallet, Transaction, WalletLedger, Order],
         synchronize: true, // Only for development
       }),
       inject: [ConfigService],
@@ -41,6 +47,11 @@ import { FulfillmentModule } from './modules/fulfillment/fulfillment.module';
     AiModule,
     OrdersModule,
     FulfillmentModule,
+    CartModule,
+    CheckoutSessionModule,
+    MessagingModule, // RabbitMQ event-driven architecture for reliability
+    EscalationsModule, // For human escalation tracking
+    ScheduledModule, // Reconciliation + abandoned cart jobs (Phase B)
   ],
   controllers: [AppController],
   providers: [AppService],

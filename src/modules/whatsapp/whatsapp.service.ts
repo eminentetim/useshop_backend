@@ -7,6 +7,8 @@ import { WalletsService } from '../wallets/wallets.service';
 import { PaymentsService } from '../payments/payments.service';
 import { AiService } from '../ai/ai.service';
 import { OrdersService } from '../orders/orders.service';
+import { CheckoutSessionService } from '../checkout/checkout-session.service';
+import { MessagingService, WhatsAppMessageEvent } from '../messaging/messaging.service';
 
 @Injectable()
 export class WhatsappService {
@@ -20,6 +22,8 @@ export class WhatsappService {
     private readonly paymentsService: PaymentsService,
     private readonly aiService: AiService,
     private readonly ordersService: OrdersService,
+    private readonly checkoutSessionService: CheckoutSessionService,
+    private readonly messagingService: MessagingService,
   ) {}
 
   async handleIncomingMessage(body: any) {
@@ -69,19 +73,44 @@ export class WhatsappService {
 
     // 3. Handle basic commands before AI processing
     const normalizedInput = userInput.toLowerCase().trim();
+
     if (normalizedInput === 'balance' || normalizedInput === 'wallet') {
       await this.handleBalanceCheck(user);
       return;
     }
 
-    if (normalizedInput === 'confirm') {
-        await this.handleCheckout(user);
-        return;
+    // === NEW SECURE CHECKOUT FLOW (CheckoutSession + PIN) ===
+    if (normalizedInput === 'pay' || normalizedInput === 'checkout') {
+      await this.handlePaymentRequest(phoneNumber);
+      return;
     }
 
-    // 4. AI Orchestration
-    const aiResponse = await this.aiService.processRequest(userInput);
-    await this.sendMessage(phoneNumber, aiResponse);
+    // User is responding with a confirmation reference + PIN (e.g. "USE-7842 1234")
+    if (/^use-\d{4}\s+\d{4}$/i.test(normalizedInput)) {
+      await this.handlePaymentConfirmation(phoneNumber, normalizedInput);
+      return;
+    }
+
+    // Legacy support (will be removed)
+    if (normalizedInput === 'confirm') {
+      await this.handleLegacyCheckout(user);
+      return;
+    }
+
+    // 4. AI Orchestration — Now published to RabbitMQ for async processing (reliability + scalability)
+    const event: WhatsAppMessageEvent = {
+      phoneNumber,
+      messageId: message.id || `msg_${Date.now()}`,
+      type: messageType,
+      payload: { userInput, originalMessage: message },
+      receivedAt: new Date().toISOString(),
+    };
+
+    await this.messagingService.publishWhatsAppMessage(event);
+
+    // Quick acknowledgment to the user (the worker will send the real AI reply)
+    // In production you might skip this or send "Thinking..." for long-running AI
+    this.logger.log(`Message from ${phoneNumber} published to RabbitMQ for async processing`);
   }
 
   private async getMediaUrl(mediaId: string): Promise<string> {
@@ -157,6 +186,65 @@ export class WhatsappService {
     } catch (error) {
         await this.sendMessage(user.phoneNumber, `Checkout failed: ${error.message}. Please fund your wallet or try again.`);
     }
+  }
+
+  /**
+   * New secure flow: User says "Pay" or "Checkout"
+   */
+  private async handlePaymentRequest(phoneNumber: string) {
+    try {
+      const paymentInfo = await this.checkoutSessionService.requestPaymentConfirmation(phoneNumber);
+
+      const message = 
+        `🛒 Ready to pay ₦${paymentInfo.total.toLocaleString()}?\n\n` +
+        `Please reply with your confirmation code and 4-digit PIN like this:\n` +
+        `${paymentInfo.reference} 1234\n\n` +
+        `This code expires in ${paymentInfo.expiresInMinutes} minutes.`;
+
+      await this.sendMessage(phoneNumber, message);
+    } catch (error) {
+      await this.sendMessage(phoneNumber, `Unable to start checkout: ${error.message}`);
+    }
+  }
+
+  /**
+   * User replies with "USE-7842 1234"
+   */
+  private async handlePaymentConfirmation(phoneNumber: string, input: string) {
+    const [reference, pin] = input.toUpperCase().split(' ');
+
+    const result = await this.checkoutSessionService.confirmWithPin(phoneNumber, reference, pin);
+
+    if (!result.success) {
+      await this.sendMessage(phoneNumber, result.message);
+      return;
+    }
+
+    // Payment confirmed at session level — now trigger actual wallet debit + order
+    await this.sendMessage(phoneNumber, '✅ Confirmation accepted. Processing payment from your wallet...');
+
+    // TODO: Wire this to the real atomic debit + order creation using the session's cartSnapshot
+    // For now we acknowledge success
+    const session = result.session!;
+    await this.sendMessage(
+      phoneNumber,
+      `Payment of ₦${session.totalAmount.toLocaleString()} is being processed.\n` +
+      `Your order will be created shortly. You'll receive tracking details.`
+    );
+
+    // In the real implementation we would now call a secure payment processor method
+    // that uses the cartSnapshot from the session
+  }
+
+  /**
+   * Legacy "confirm" flow — will be deprecated
+   */
+  private async handleLegacyCheckout(user: any) {
+    await this.sendMessage(
+      user.phoneNumber,
+      'The old "confirm" command is being replaced with the new secure checkout flow.\n\n' +
+      'Please reply with "pay" to start the new secure checkout process.'
+    );
   }
 
   async sendMessage(to: string, text: string) {

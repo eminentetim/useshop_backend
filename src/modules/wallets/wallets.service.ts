@@ -28,4 +28,16 @@ export class WalletsService {
     await this.walletRepository.update(walletId, updateData);
     return this.walletRepository.findOne({ where: { id: walletId } });
   }
+
+  async findAll(phone?: string): Promise<Wallet[]> {
+    const query = this.walletRepository.createQueryBuilder('wallet')
+      .leftJoinAndSelect('wallet.user', 'user')
+      .orderBy('wallet.createdAt', 'DESC');
+
+    if (phone) {
+      query.where('user.phoneNumber = :phone', { phone });
+    }
+
+    return query.getMany();
+  }
 }
