@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -9,6 +9,9 @@ import { AiService } from '../ai/ai.service';
 import { OrdersService } from '../orders/orders.service';
 import { CheckoutSessionService } from '../checkout/checkout-session.service';
 import { MessagingService, WhatsAppMessageEvent } from '../messaging/messaging.service';
+import { ShoppingAgentService } from '../ai/shopping-agent.service';
+import { ShoppingPINService } from '../wallets/pin/shopping-pin.service';
+import { Twilio } from 'twilio';
 
 @Injectable()
 export class WhatsappService {
@@ -19,49 +22,86 @@ export class WhatsappService {
     private readonly httpService: HttpService,
     private readonly usersService: UsersService,
     private readonly walletsService: WalletsService,
-    private readonly paymentsService: PaymentsService,
     private readonly aiService: AiService,
-    private readonly ordersService: OrdersService,
     private readonly checkoutSessionService: CheckoutSessionService,
-    private readonly messagingService: MessagingService,
+    @Optional() private readonly ordersService?: OrdersService,
+    @Optional() private readonly messagingService?: MessagingService,
+    @Optional() private readonly paymentsService?: PaymentsService,
+    @Optional() private readonly shoppingAgentService?: ShoppingAgentService,
+    private readonly shoppingPINService?: ShoppingPINService,
   ) {}
 
+  private onboardingStates = new Map<string, { step: 'AWAITING_PIN' | 'AWAITING_PIN_CONFIRM'; tempPin?: string }>();
+
   async handleIncomingMessage(body: any) {
-    this.logger.log('Received WhatsApp message', JSON.stringify(body));
+    this.logger.log('Received WhatsApp message payload:', JSON.stringify(body));
 
-    const entry = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
+    let phoneNumber = '';
+    let messageType = 'text';
+    let isTwilio = false;
 
-    if (!message) return;
+    // Check if it is a Twilio payload
+    if (body.MessageSid || body.From) {
+      isTwilio = true;
+      phoneNumber = body.From;
+      if (phoneNumber && phoneNumber.startsWith('whatsapp:')) {
+        phoneNumber = phoneNumber.replace('whatsapp:', '');
+      }
+    } else {
+      const entry = body.entry?.[0];
+      const changes = entry?.changes?.[0];
+      const value = changes?.value;
+      const message = value?.messages?.[0];
 
-    const phoneNumber = message.from;
-    const messageType = message.type;
-    let userInput = '';
-
-    // 1. Find or create user
-    const { user, isNew } = await this.usersService.findOrCreateByPhoneNumber(phoneNumber);
-
-    if (isNew) {
-      await this.handleOnboarding(user);
-      return;
+      if (!message) return;
+      phoneNumber = message.from;
+      messageType = message.type;
     }
 
-    // 2. Process Multimodal Input
+    if (!phoneNumber) return;
+
+    // Find or create user
+    const { user } = await this.usersService.findOrCreateByPhoneNumber(phoneNumber);
+
+    // Process Multimodal Input
+    let userInput = '';
     try {
-      if (messageType === 'text') {
-        userInput = message.text.body;
-      } else if (messageType === 'audio') {
-        const audioUrl = await this.getMediaUrl(message.audio.id);
-        userInput = await this.aiService.transcribeVoice(audioUrl);
-      } else if (messageType === 'image') {
-        const imageUrl = await this.getMediaUrl(message.image.id);
-        userInput = await this.aiService.analyzeImage(imageUrl, message.image.caption);
-      } else if (messageType === 'video') {
-        userInput = "I received your video! I'm still learning how to watch videos, but I can help if you describe what's in it or send a photo.";
-        await this.sendMessage(phoneNumber, userInput);
-        return;
+      if (isTwilio) {
+        const numMedia = parseInt(body.NumMedia || '0', 10);
+        if (numMedia > 0) {
+          const contentType = body.MediaContentType0 || '';
+          const mediaUrl = body.MediaUrl0;
+          if (contentType.startsWith('audio/')) {
+            userInput = await this.aiService.transcribeVoice(mediaUrl);
+          } else if (contentType.startsWith('image/')) {
+            userInput = await this.aiService.analyzeImage(mediaUrl, body.Body || '');
+          } else if (contentType.startsWith('video/')) {
+            userInput = "I received your video! I'm still learning how to watch videos, but I can help if you describe what's in it or send a photo.";
+            await this.sendMessage(phoneNumber, userInput);
+            return;
+          }
+        } else {
+          userInput = body.Body || '';
+        }
+      } else {
+        const entry = body.entry?.[0];
+        const changes = entry?.changes?.[0];
+        const value = changes?.value;
+        const message = value?.messages?.[0];
+
+        if (messageType === 'text') {
+          userInput = message.text.body;
+        } else if (messageType === 'audio') {
+          const audioUrl = await this.getMediaUrl(message.audio.id);
+          userInput = await this.aiService.transcribeVoice(audioUrl);
+        } else if (messageType === 'image') {
+          const imageUrl = await this.getMediaUrl(message.image.id);
+          userInput = await this.aiService.analyzeImage(imageUrl, message.image.caption);
+        } else if (messageType === 'video') {
+          userInput = "I received your video! I'm still learning how to watch videos, but I can help if you describe what's in it or send a photo.";
+          await this.sendMessage(phoneNumber, userInput);
+          return;
+        }
       }
     } catch (error) {
       this.logger.error('Error processing multimodal input', error.message);
@@ -70,6 +110,21 @@ export class WhatsappService {
     }
 
     if (!userInput) return;
+
+    // Check if onboarding PIN setup is active/needed
+    let wallets = await this.walletsService.findByUser(user);
+    let ngnWallet = wallets.find(w => w.currency === 'NGN');
+    if (!ngnWallet) {
+      ngnWallet = await this.walletsService.createWallet(user);
+    }
+
+    const pinSet = this.shoppingPINService ? this.shoppingPINService.hasPINSet(ngnWallet) : false;
+    const onboardingState = this.onboardingStates.get(phoneNumber);
+
+    if (!pinSet || onboardingState) {
+      await this.handlePinSetup(phoneNumber, userInput.trim(), ngnWallet, user);
+      return;
+    }
 
     // 3. Handle basic commands before AI processing
     const normalizedInput = userInput.toLowerCase().trim();
@@ -97,20 +152,18 @@ export class WhatsappService {
       return;
     }
 
-    // 4. AI Orchestration — Now published to RabbitMQ for async processing (reliability + scalability)
-    const event: WhatsAppMessageEvent = {
-      phoneNumber,
-      messageId: message.id || `msg_${Date.now()}`,
-      type: messageType,
-      payload: { userInput, originalMessage: message },
-      receivedAt: new Date().toISOString(),
-    };
-
-    await this.messagingService.publishWhatsAppMessage(event);
-
-    // Quick acknowledgment to the user (the worker will send the real AI reply)
-    // In production you might skip this or send "Thinking..." for long-running AI
-    this.logger.log(`Message from ${phoneNumber} published to RabbitMQ for async processing`);
+    // 4. AI Orchestration — Direct call for testing (bypasses consumer circular dependency)
+    if (this.shoppingAgentService) {
+      try {
+        const aiResponse = await this.shoppingAgentService.processMessage(userInput, phoneNumber);
+        await this.sendMessage(phoneNumber, aiResponse);
+      } catch (error) {
+        this.logger.error('Direct agent call failed', error);
+        await this.sendMessage(phoneNumber, "Sorry, the AI is having a moment. Please try again shortly.");
+      }
+    } else {
+      await this.sendMessage(phoneNumber, "AI agent not available in this test configuration.");
+    }
   }
 
   private async getMediaUrl(mediaId: string): Promise<string> {
@@ -126,33 +179,99 @@ export class WhatsappService {
     return response.data.url;
   }
 
-  private async handleOnboarding(user: any) {
-    const wallet = await this.walletsService.createWallet(user);
-    let welcomeMessage = `Welcome to UseShop! 🛍️ I'm your AI shopping assistant.\n\nI've created your NGN wallet.`;
+  private async handlePinSetup(phoneNumber: string, userInput: string, ngnWallet: any, user: any) {
+    let state = this.onboardingStates.get(phoneNumber);
 
-    try {
-      const monnifyAccount = await this.paymentsService.createReservedAccount({
-        id: user.id,
-        phoneNumber: user.phoneNumber,
-        name: user.name,
-        email: user.email,
-      });
+    if (!state) {
+      // Step 1: Initialize onboarding and call Monnify reserved account
+      let virtualAccountInfo = '';
+      try {
+        if (this.paymentsService) {
+          const monnifyAcct = await this.paymentsService.createReservedAccount({
+            id: user.id,
+            phoneNumber: user.phoneNumber,
+            name: user.name || '',
+            email: user.email || '',
+          });
 
-      if (monnifyAccount && monnifyAccount.accounts) {
-        const acc = monnifyAccount.accounts[0];
-        await this.walletsService.updateWallet(wallet.id, {
-          monnifyAccountNumber: acc.accountNumber,
-          monnifyBankName: acc.bankName,
-          monnifyAccountReference: monnifyAccount.accountReference,
-        });
+          if (monnifyAcct && monnifyAcct.accounts && monnifyAcct.accounts.length > 0) {
+            const acct = monnifyAcct.accounts[0];
+            
+            // Save virtual account details to wallet entity
+            await this.walletsService.updateWallet(ngnWallet.id, {
+              monnifyAccountNumber: acct.accountNumber,
+              monnifyAccountReference: monnifyAcct.accountReference,
+              monnifyBankName: acct.bankName,
+            });
 
-        welcomeMessage += `\n\nYou can fund your wallet by transferring to:\nBank: ${acc.bankName}\nAccount: ${acc.accountNumber}\nName: ${acc.accountName}`;
+            // Update local object reference
+            ngnWallet.monnifyAccountNumber = acct.accountNumber;
+            ngnWallet.monnifyBankName = acct.bankName;
+
+            virtualAccountInfo = `\n🏦 *Your Wallet Funding Account Details*:\n• Bank Name: ${acct.bankName}\n• Account Number: ${acct.accountNumber}\n• Account Name: ${acct.accountName}\n`;
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Failed to create Monnify reserved account: ${error.message}`);
       }
-    } catch (error) {
-      welcomeMessage += `\n\n(Wallet funding is currently being set up. I'll notify you once it's ready!)`;
+
+      const welcomeText = 
+        `Welcome to UseShop! 🛍️ I'm your AI shopping assistant. I've created your NGN wallet.\n` +
+        `${virtualAccountInfo}\n` +
+        `To secure your wallet transactions, please choose a 4 to 6-digit Shopping PIN. Reply with your desired PIN now (e.g. 1234):`;
+
+      await this.sendMessage(phoneNumber, welcomeText);
+      this.onboardingStates.set(phoneNumber, { step: 'AWAITING_PIN' });
+      return;
     }
 
-    await this.sendMessage(user.phoneNumber, welcomeMessage);
+    if (state.step === 'AWAITING_PIN') {
+      if (!/^\d{4,6}$/.test(userInput)) {
+        await this.sendMessage(phoneNumber, `❌ Invalid PIN. Please reply with a 4 to 6-digit numeric PIN (e.g. 1234) to secure your wallet:`);
+        return;
+      }
+
+      this.onboardingStates.set(phoneNumber, { step: 'AWAITING_PIN_CONFIRM', tempPin: userInput });
+      await this.sendMessage(phoneNumber, `Please re-enter your 4 to 6-digit Shopping PIN to confirm:`);
+      return;
+    }
+
+    if (state.step === 'AWAITING_PIN_CONFIRM') {
+      if (userInput !== state.tempPin) {
+        this.onboardingStates.set(phoneNumber, { step: 'AWAITING_PIN' });
+        await this.sendMessage(phoneNumber, `❌ PINs did not match. Let's try again.\n\nPlease choose a 4 to 6-digit Shopping PIN. Reply with your desired PIN now:`);
+        return;
+      }
+
+      try {
+        if (this.shoppingPINService) {
+          await this.shoppingPINService.setPIN(ngnWallet, userInput);
+        }
+        this.onboardingStates.delete(phoneNumber);
+
+        let fundingText = '';
+        if (ngnWallet.monnifyAccountNumber) {
+          fundingText = `🏦 *Bank Name:* ${ngnWallet.monnifyBankName}\n🔢 *Account Number:* \`${ngnWallet.monnifyAccountNumber}\`\n👤 *Account Name:* UseShop User ${user.phoneNumber}`;
+        } else {
+          fundingText = `(Virtual funding accounts are temporarily offline, but you can shop using test credentials.)`;
+        }
+
+        const successText = 
+          `✅ *Setup Complete!*\n\n` +
+          `Your Shopping PIN has been set and your NGN wallet is now active. 🎉\n\n` +
+          `💡 *Please fund your wallet to start shopping:*\n` +
+          `You can deposit funds by making a standard bank transfer to your dedicated virtual account:\n\n` +
+          `${fundingText}\n\n` +
+          `After funding, just send me a message with what you want to buy, and we will get started!`;
+
+        await this.sendMessage(phoneNumber, successText);
+      } catch (error) {
+        this.logger.error(`Failed to set PIN: ${error.message}`);
+        this.onboardingStates.set(phoneNumber, { step: 'AWAITING_PIN' });
+        await this.sendMessage(phoneNumber, `❌ There was an error saving your PIN. Please try again. Reply with your desired 4 to 6-digit PIN now:`);
+      }
+      return;
+    }
   }
 
   private async handleBalanceCheck(user: any) {
@@ -173,6 +292,10 @@ export class WhatsappService {
 
   private async handleCheckout(user: any) {
     try {
+        if (!this.ordersService) {
+          await this.sendMessage(user.phoneNumber, "Legacy checkout path unavailable in current test mode. Use 'pay' to start the secure PIN checkout flow instead.");
+          return;
+        }
         const pendingOrders = await this.ordersService.findByUser(user);
         const lastPending = pendingOrders.find(o => o.status === 'PENDING_PAYMENT');
 
@@ -220,20 +343,32 @@ export class WhatsappService {
       return;
     }
 
-    // Payment confirmed at session level — now trigger actual wallet debit + order
-    await this.sendMessage(phoneNumber, '✅ Confirmation accepted. Processing payment from your wallet...');
-
-    // TODO: Wire this to the real atomic debit + order creation using the session's cartSnapshot
-    // For now we acknowledge success
     const session = result.session!;
-    await this.sendMessage(
-      phoneNumber,
-      `Payment of ₦${session.totalAmount.toLocaleString()} is being processed.\n` +
-      `Your order will be created shortly. You'll receive tracking details.`
-    );
 
-    // In the real implementation we would now call a secure payment processor method
-    // that uses the cartSnapshot from the session
+    if (this.ordersService) {
+      try {
+        await this.sendMessage(phoneNumber, '⏳ PIN confirmed. Processing wallet payment and creating your order...');
+        await this.ordersService.processCheckoutSessionPayment(session);
+        await this.sendMessage(
+          phoneNumber,
+          `🛍️ *Payment Successful!*\n\n` +
+          `Your payment of ₦${session.totalAmount.toLocaleString()} was debited from your wallet.\n` +
+          `Your order has been placed and is now being processed. Tracking ID: \`US-${session.id.split('-')[0].toUpperCase()}\``
+        );
+      } catch (error) {
+        this.logger.error('Failed to process checkout session payment:', error);
+        await this.sendMessage(
+          phoneNumber,
+          `❌ Payment accepted, but we encountered an error completing your order: ${error.message}. Please contact support.`
+        );
+      }
+    } else {
+      await this.sendMessage(
+        phoneNumber,
+        `Payment of ₦${session.totalAmount.toLocaleString()} is being processed.\n` +
+        `Your order will be created shortly. You'll receive tracking details.`
+      );
+    }
   }
 
   /**
@@ -248,19 +383,45 @@ export class WhatsappService {
   }
 
   async sendMessage(to: string, text: string) {
+    const accountSid = this.configService.get<string>('TWILIO_ACCOUNT_SID');
+    const authToken = this.configService.get<string>('TWILIO_AUTH_TOKEN');
+
+    if (accountSid && authToken) {
+      const fromNumber = this.configService.get<string>('TWILIO_PHONE_NUMBER') || 'whatsapp:+14155238886';
+      
+      const formattedTo = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+      const formattedFrom = fromNumber.startsWith('whatsapp:') ? fromNumber : `whatsapp:${fromNumber}`;
+
+      try {
+        const client = new Twilio(accountSid, authToken);
+        await client.messages.create({
+          body: text,
+          from: formattedFrom,
+          to: formattedTo,
+        });
+        this.logger.log(`WhatsApp message sent via Twilio to ${formattedTo}`);
+        return;
+      } catch (error) {
+        this.logger.error(`Failed to send WhatsApp message via Twilio: ${error.message}`);
+        return;
+      }
+    }
+
+    // Fallback to Facebook Graph API
     const phoneNumberId = this.configService.get<string>('WHATSAPP_PHONE_NUMBER_ID');
     const accessToken = this.configService.get<string>('WHATSAPP_ACCESS_TOKEN');
 
     if (!phoneNumberId || !accessToken) {
-      this.logger.warn('WhatsApp credentials not set. Message not sent:', text);
+      this.logger.warn('Neither Twilio nor Facebook WhatsApp credentials are set. Message not sent:', text);
       return;
     }
 
+    const cleanTo = to.replace('whatsapp:', '');
     const url = `https://graph.facebook.com/v17.0/${phoneNumberId}/messages`;
     const data = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: to,
+      to: cleanTo,
       type: 'text',
       text: { body: text },
     };
@@ -271,8 +432,9 @@ export class WhatsappService {
           headers: { Authorization: `Bearer ${accessToken}` },
         }),
       );
+      this.logger.log(`WhatsApp message sent via Facebook Graph API to ${cleanTo}`);
     } catch (error) {
-      this.logger.error('Failed to send WhatsApp message', error.response?.data || error.message);
+      this.logger.error('Failed to send WhatsApp message via Facebook Graph API', error.response?.data || error.message);
     }
   }
 }

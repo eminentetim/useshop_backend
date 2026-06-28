@@ -1,11 +1,11 @@
-import { Controller, Post, Body, Logger, Inject } from '@nestjs/common';
+import { Controller, Post, Body, Logger, Inject, Optional } from '@nestjs/common';
 
 @Controller('langsmith')
 export class LangSmithWebhookController {
   private readonly logger = new Logger(LangSmithWebhookController.name);
   private readonly ALERTS_KEY = 'langsmith:alerts';
 
-  constructor(@Inject('REDIS_CLIENT') private readonly redis: any) {}
+  constructor(@Optional() @Inject('REDIS_CLIENT') private readonly redis?: any) {}
 
   @Post('webhook')
   async handleWebhook(@Body() payload: any) {
@@ -22,8 +22,10 @@ export class LangSmithWebhookController {
         project: payload.project_name || 'useshop-agent',
       };
 
-      await this.redis.lpush(this.ALERTS_KEY, JSON.stringify(alert));
-      await this.redis.ltrim(this.ALERTS_KEY, 0, 49); // keep last 50
+      if (this.redis) {
+        await this.redis.lpush(this.ALERTS_KEY, JSON.stringify(alert));
+        await this.redis.ltrim(this.ALERTS_KEY, 0, 49); // keep last 50
+      }
 
       this.logger.warn(alert.message);
     }

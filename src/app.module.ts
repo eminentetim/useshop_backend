@@ -49,9 +49,9 @@ import { ScheduledModule } from './modules/scheduled/scheduled.module';
     FulfillmentModule,
     CartModule,
     CheckoutSessionModule,
-    MessagingModule, // RabbitMQ event-driven architecture for reliability
-    EscalationsModule, // For human escalation tracking
-    ScheduledModule, // Reconciliation + abandoned cart jobs (Phase B)
+    MessagingModule,
+    EscalationsModule,
+    ScheduledModule,
   ],
   controllers: [AppController],
   providers: [AppService],

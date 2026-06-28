@@ -11,6 +11,15 @@ import { FraudCheckService } from '../ai/fraud-check.service';
 import { EscalationService } from '../escalations/escalation.service';
 import { PaymentsService } from '../payments/payments.service';
 import { MessagingService } from '../messaging/messaging.service';
+import { FulfillmentService } from '../fulfillment/fulfillment.service';
+import { Wallet } from '../wallets/entities/wallet.entity';
+
+jest.mock('puppeteer', () => ({
+  launch: jest.fn().mockResolvedValue({
+    newPage: jest.fn(),
+    close: jest.fn(),
+  }),
+}));
 
 describe('OrdersService - Refund Logic', () => {
   let service: OrdersService;
@@ -27,19 +36,21 @@ describe('OrdersService - Refund Logic', () => {
     })),
   };
 
+  const mockQueryRunner = {
+    connect: jest.fn(),
+    startTransaction: jest.fn(),
+    manager: {
+      findOne: jest.fn(),
+      save: jest.fn(),
+      create: jest.fn(),
+    },
+    commitTransaction: jest.fn(),
+    rollbackTransaction: jest.fn(),
+    release: jest.fn(),
+  };
+
   const mockDataSource = {
-    createQueryRunner: jest.fn(() => ({
-      connect: jest.fn(),
-      startTransaction: jest.fn(),
-      manager: {
-        findOne: jest.fn(),
-        save: jest.fn(),
-        create: jest.fn(),
-      },
-      commitTransaction: jest.fn(),
-      rollbackTransaction: jest.fn(),
-      release: jest.fn(),
-    })),
+    createQueryRunner: jest.fn(() => mockQueryRunner),
   };
 
   beforeEach(async () => {
@@ -48,9 +59,11 @@ describe('OrdersService - Refund Logic', () => {
         OrdersService,
         { provide: getRepositoryToken(Order), useValue: mockOrderRepo },
         { provide: DataSource, useValue: mockDataSource },
+        { provide: FulfillmentService, useValue: {} },
         { provide: UsersService, useValue: { findOrCreateByPhoneNumber: jest.fn() } },
         { provide: CheckoutSessionService, useValue: {} },
         { provide: WalletLedgerService, useValue: { recordEntry: jest.fn() } },
+        { provide: getRepositoryToken(Wallet), useValue: {} },
         { provide: ConfigService, useValue: { get: jest.fn((k, d) => d) } },
         { provide: FraudCheckService, useValue: { isPhoneBlocked: jest.fn().mockResolvedValue(false), getRecentChecks: jest.fn().mockResolvedValue([]) } },
         { provide: EscalationService, useValue: { createEscalation: jest.fn() } },
@@ -67,7 +80,12 @@ describe('OrdersService - Refund Logic', () => {
   });
 
   it('refundToWallet should reject already refunded orders', async () => {
-    mockOrderRepo.findOne.mockResolvedValue({ status: 'REFUNDED', user: { phoneNumber: '123' } });
+    mockQueryRunner.manager.findOne.mockResolvedValue({ 
+      status: 'REFUNDED', 
+      user: { phoneNumber: '123' },
+      createdAt: new Date().toISOString(),
+      price: 100,
+    });
     const result = await service.refundToWallet('some-id');
     expect(result.success).toBe(false);
     expect(result.message).toContain('already been refunded');

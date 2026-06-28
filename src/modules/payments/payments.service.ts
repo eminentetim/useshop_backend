@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -8,8 +8,7 @@ import { LedgerEntryType } from '../wallets/entities/wallet-ledger.entity';
 import { MessagingService } from '../messaging/messaging.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { PAYMENT_PROVIDER } from './interfaces/payment-provider.interface';
-import type { PaymentProvider } from './interfaces/payment-provider.interface';
+
 
 @Injectable()
 export class PaymentsService {
@@ -21,10 +20,9 @@ export class PaymentsService {
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     private readonly walletLedgerService: WalletLedgerService,
-    private readonly messagingService: MessagingService,
     @InjectRepository(Wallet)
     private readonly walletRepository: Repository<Wallet>,
-    @Inject(PAYMENT_PROVIDER) private readonly paymentProvider: PaymentProvider,
+    @Optional() private readonly messagingService?: MessagingService,
   ) {}
 
   private async getAccessToken(): Promise<string> {
@@ -61,8 +59,33 @@ export class PaymentsService {
   }
 
   async createReservedAccount(user: { id: string; name?: string; email?: string; phoneNumber: string }) {
-    // Delegate to the active PaymentProvider (Monnify for now)
-    return this.paymentProvider.createVirtualAccount(user);
+    const baseUrl = this.configService.get<string>('MONNIFY_BASE_URL');
+    const contractCode = this.configService.get<string>('MONNIFY_CONTRACT_CODE');
+    const token = await this.getAccessToken();
+
+    const data = {
+      accountReference: `USEShop_${user.id}_${Date.now()}`,
+      accountName: user.name || `UseShop User ${user.phoneNumber}`,
+      currencyCode: 'NGN',
+      contractCode: contractCode,
+      customerEmail: user.email || `${user.phoneNumber}@useshop.ai`,
+      customerName: user.name || `User ${user.phoneNumber}`,
+      getAllAvailableBanks: true,
+    };
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.post(`${baseUrl}/api/v1/bank-transfer/reserved-accounts`, data, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      );
+      return response.data.responseBody;
+    } catch (error) {
+      this.logger.error('Failed to create Monnify reserved account', error.response?.data || error.message);
+      throw error;
+    }
   }
 
   /**
@@ -75,13 +98,55 @@ export class PaymentsService {
     amount: number,
     currency: string = 'NGN',
   ) {
-    // Delegate to the active PaymentProvider
-    return this.paymentProvider.handleIncomingDeposit({
-      providerReference: monnifyReference,
-      accountReference,
-      amount,
-      currency,
+    const wallet = await this.walletRepository.findOne({
+      where: { monnifyAccountReference: accountReference, currency: currency as Currency },
+      relations: ['user'],
     });
+
+    if (!wallet) {
+      this.logger.error(`Wallet not found for Monnify reference: ${accountReference}`);
+      return;
+    }
+
+    if (wallet.status !== 'ACTIVE') {
+      this.logger.warn(`Attempted credit to non-active wallet: ${wallet.id}`);
+      return;
+    }
+
+    const previousBalance = Number(wallet.balance);
+    const newBalance = previousBalance + amount;
+
+    await this.walletLedgerService.recordEntry({
+      wallet,
+      type: LedgerEntryType.CREDIT,
+      amount,
+      balanceAfter: newBalance,
+      reference: monnifyReference,
+      description: `Wallet funded via Monnify - ${monnifyReference}`,
+      metadata: {
+        monnifyReference,
+        accountReference,
+        source: 'monnify_webhook',
+      },
+    });
+
+    wallet.balance = newBalance;
+    await this.walletRepository.save(wallet);
+
+    this.logger.log(`Wallet ${wallet.id} credited with ₦${amount} via Monnify. New balance: ₦${newBalance}`);
+
+    const LOW_BALANCE_THRESHOLD = this.configService.get<number>('LOW_BALANCE_THRESHOLD', 5000);
+    if (newBalance < LOW_BALANCE_THRESHOLD && currency === 'NGN') {
+      const phone = wallet.user?.phoneNumber;
+      if (phone && this.messagingService) {
+        this.messagingService.publishLowBalanceAlert(phone, newBalance, currency).catch(err =>
+          this.logger.error('Failed to publish low balance alert', err),
+        );
+      }
+      this.logger.warn(`Low balance alert published for ${wallet.user?.phoneNumber || 'unknown'}: ₦${newBalance}`);
+    }
+
+    return { walletId: wallet.id, newBalance };
   }
 
   /**
@@ -89,13 +154,7 @@ export class PaymentsService {
    * For true instant UX we currently prefer crediting the UseShop wallet (see OrdersService.refundToWallet).
    * This method can be called from an admin flow or escalation when the customer wants funds sent to their bank.
    */
-  async initiateMonnifyDisbursement(params: any) {
-    // Delegate to provider (full migration of body can happen later)
-    return this.paymentProvider.initiatePayout(params);
-  }
-
-  // Legacy method kept for backward compatibility during transition
-  private async _legacyInitiateMonnifyDisbursement(params: {
+  async initiateMonnifyDisbursement(params: {
     phoneNumber: string;
     amount: number;
     bankCode: string;
@@ -103,7 +162,7 @@ export class PaymentsService {
     accountName: string;
     reference?: string;
     narration?: string;
-  }): Promise<{ success: boolean; message: string; reference?: string; monnifyStatus?: string; data?: any }> {
+  }) {
     const baseUrl = this.configService.get<string>('MONNIFY_BASE_URL', 'https://sandbox.monnify.com');
     const token = await this.getAccessToken();
 
@@ -117,9 +176,7 @@ export class PaymentsService {
       destinationAccountNumber: params.accountNumber,
       destinationAccountName: params.accountName,
       currency: 'NGN',
-      // sourceAccountNumber is often required — use the merchant's settlement account if known
-      // For many setups it is the main wallet. Leaving optional for now.
-      async: true, // Prefer async + webhooks in production
+      async: true,
     };
 
     try {
@@ -155,6 +212,8 @@ export class PaymentsService {
       };
     }
   }
+
+
 
   /**
    * Handle Monnify disbursement (outgoing bank transfer) webhook updates.

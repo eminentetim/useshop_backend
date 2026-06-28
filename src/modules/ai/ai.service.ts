@@ -4,28 +4,77 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import * as FormData from 'form-data';
 import { ChatOpenAI } from '@langchain/openai';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { SearchTool } from './tools/search.tool';
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
-  private model: ChatOpenAI;
+  private model: any;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     private readonly searchTool: SearchTool,
   ) {
-    this.model = new ChatOpenAI({
-      openAIApiKey: this.configService.get<string>('OPENAI_API_KEY'),
-      modelName: 'gpt-4o',
-      temperature: 0,
-    });
+    const geminiKey = this.configService.get<string>('GEMINI_API_KEY') || this.configService.get<string>('GOOGLE_API_KEY');
+    const openAIKey = this.configService.get<string>('OPENAI_API_KEY');
+
+    if (geminiKey) {
+      this.logger.log('Using Google Gemini model for AI Service');
+      this.model = new ChatGoogleGenerativeAI({
+        apiKey: geminiKey,
+        model: 'gemini-2.5-flash',
+        temperature: 0,
+      });
+    } else {
+      this.logger.log('Using OpenAI GPT-4o model for AI Service');
+      this.model = new ChatOpenAI({
+        openAIApiKey: openAIKey,
+        modelName: 'gpt-4o',
+        temperature: 0,
+      });
+    }
   }
 
   async transcribeVoice(audioUrl: string): Promise<string> {
-    const apiKey = this.configService.get<string>('OPENAI_API_KEY');
-    if (!apiKey) return 'OpenAI API Key not set.';
+    const geminiKey = this.configService.get<string>('GEMINI_API_KEY') || this.configService.get<string>('GOOGLE_API_KEY');
+    const openAIKey = this.configService.get<string>('OPENAI_API_KEY');
+
+    if (geminiKey) {
+      try {
+        const response = await firstValueFrom(
+          this.httpService.get(audioUrl, {
+            responseType: 'arraybuffer',
+            headers: audioUrl.includes('twilio') ? {} : {
+              Authorization: `Bearer ${this.configService.get('WHATSAPP_ACCESS_TOKEN')}`,
+            },
+          }),
+        );
+
+        const base64Audio = Buffer.from(response.data).toString('base64');
+
+        const transcriptionResponse = await this.model.invoke([
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Transcribe the audio exactly. Do not add any conversational preamble or extra notes. Output only the transcription.' },
+              {
+                type: 'image_url', // Standard LangChain syntax translates this to multimedia parts
+                image_url: { url: `data:audio/ogg;base64,${base64Audio}` }
+              }
+            ]
+          }
+        ]);
+
+        return (transcriptionResponse.content as string).trim();
+      } catch (error) {
+        this.logger.error('Failed to transcribe voice via Gemini', error.message);
+        return 'Error transcribing voice note.';
+      }
+    }
+
+    if (!openAIKey) return 'OpenAI API Key not set.';
 
     try {
       // 1. Download the audio from WhatsApp URL
@@ -50,22 +99,25 @@ export class AiService {
         this.httpService.post('https://api.openai.com/v1/audio/transcriptions', form, {
           headers: {
             ...form.getHeaders(),
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Bearer ${openAIKey}`,
           },
         }),
       );
 
       return whisperResponse.data.text;
     } catch (error) {
-      this.logger.error('Failed to transcribe voice', error.message);
+      this.logger.error('Failed to transcribe voice via Whisper', error.message);
       return 'Error transcribing voice note.';
     }
   }
 
   async analyzeImage(imageUrl: string, caption?: string): Promise<string> {
-    // This uses GPT-4o Vision to understand what the user wants based on an image
-    const apiKey = this.configService.get<string>('OPENAI_API_KEY');
-    if (!apiKey) return 'OpenAI API Key not set.';
+    const geminiKey = this.configService.get<string>('GEMINI_API_KEY') || this.configService.get<string>('GOOGLE_API_KEY');
+    const openAIKey = this.configService.get<string>('OPENAI_API_KEY');
+
+    if (!geminiKey && !openAIKey) {
+      return 'No AI API Key configured.';
+    }
 
     try {
         const response = await this.model.invoke([

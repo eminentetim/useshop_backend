@@ -209,14 +209,14 @@ export class OrdersService {
       reason,
       refundedTo: 'BANK',
       timestamp: new Date().toISOString(),
-      metadata: { monnifyStatus: (disbursement as any).monnifyStatus, reference: disbursement.reference },
+      metadata: { monnifyStatus: (disbursement as any)?.monnifyStatus, reference: (disbursement as any)?.reference },
     }).catch(() => {});
 
     return {
       success: disbursement.success,
       message: disbursement.message,
-      reference: disbursement.reference,
-      monnifyStatus: (disbursement as any).monnifyStatus,
+      reference: (disbursement as any)?.reference,
+      monnifyStatus: (disbursement as any)?.monnifyStatus,
     };
   }
 

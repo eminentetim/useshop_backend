@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 
 export interface FraudCheckResult {
   id: string;
@@ -19,7 +19,7 @@ export class FraudCheckService {
   private readonly BLOCKED_KEY = 'fraud:blocked:phones';
   private readonly FORCE_2FA_KEY = 'fraud:force2fa:phones';
 
-  constructor(@Inject('REDIS_CLIENT') private readonly redis: any) {}
+  constructor(@Optional() @Inject('REDIS_CLIENT') private readonly redis?: any) {}
 
   async logFraudCheck(result: Omit<FraudCheckResult, 'id' | 'timestamp'>): Promise<FraudCheckResult> {
     const fullResult: FraudCheckResult = {
@@ -28,8 +28,10 @@ export class FraudCheckService {
       timestamp: new Date().toISOString(),
     };
 
-    await this.redis.lpush(this.KEY, JSON.stringify(fullResult));
-    await this.redis.ltrim(this.KEY, 0, 99); // keep last 100
+    if (this.redis) {
+      await this.redis.lpush(this.KEY, JSON.stringify(fullResult));
+      await this.redis.ltrim(this.KEY, 0, 99); // keep last 100
+    }
 
     this.logger.log(`Fraud check logged for ${result.phoneNumber}: ${result.riskLevel}`);
     return fullResult;

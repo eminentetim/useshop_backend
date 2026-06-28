@@ -26,4 +26,8 @@ export class UsersService {
   async findByPhoneNumber(phoneNumber: string): Promise<User | null> {
     return this.userRepository.findOne({ where: { phoneNumber }, relations: ['wallets'] });
   }
+
+  async findAll(): Promise<User[]> {
+    return this.userRepository.find({ relations: ['wallets'] });
+  }
 }

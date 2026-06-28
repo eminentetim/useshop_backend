@@ -22,6 +22,6 @@ import { CartService } from './cart.service';
     },
     CartService,
   ],
-  exports: [CartService],
+  exports: [CartService, 'REDIS_CLIENT'],
 })
 export class CartModule {}

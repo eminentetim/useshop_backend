@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AmqpConnection } from '@golevelup/nestjs-rabbitmq';
+// RabbitMQ types removed for minimal startup (no AmqpConnection in graph to avoid circular inside MessagingModule)
 import {
   USESHOP_EXCHANGE,
   WHATSAPP_QUEUE,
@@ -45,60 +45,50 @@ export interface OrderRefundedEvent {
 @Injectable()
 export class MessagingService {
   private readonly logger = new Logger(MessagingService.name);
+  private readonly amqpConnection: any = null; // Always null in minimal startup (RabbitMQ disabled to break cycles)
 
-  constructor(private readonly amqpConnection: AmqpConnection) {}
+  constructor() {
+    this.logger.warn('MessagingService running in NO-RABBIT mode for clean WhatsApp test startup. All publish* are no-ops.');
+  }
 
   /**
    * Publish an incoming WhatsApp message for async processing (AI, cart, etc.)
    */
+  private async safePublish(routingKey: string, payload: any, logMsg?: string) {
+    // Rabbit disabled for minimal startup — no-op is intentional
+    this.logger.debug(`[NO-RABBIT] Suppressed publish to ${routingKey}: ${logMsg || JSON.stringify(payload).slice(0, 80)}`);
+  }
+
   async publishWhatsAppMessage(event: WhatsAppMessageEvent) {
-    await this.amqpConnection.publish(
-      USESHOP_EXCHANGE,
-      'whatsapp.message.received',
-      event,
-    );
-    this.logger.debug(`Published WhatsApp message for ${event.phoneNumber}`);
+    await this.safePublish('whatsapp.message.received', event, `Published WhatsApp message for ${event.phoneNumber}`);
   }
 
   /**
    * Publish checkout session lifecycle events
    */
   async publishCheckoutEvent(event: CheckoutSessionEvent) {
-    await this.amqpConnection.publish(
-      USESHOP_EXCHANGE,
-      'checkout.session.updated',
-      event,
-    );
-    this.logger.log(`Published checkout event: ${event.action} for ${event.phoneNumber}`);
+    await this.safePublish('checkout.session.updated', event, `Published checkout event: ${event.action} for ${event.phoneNumber}`);
   }
 
   /**
    * Publish when an order has been successfully created (after payment)
    */
   async publishOrderCreated(event: OrderCreatedEvent) {
-    await this.amqpConnection.publish(
-      USESHOP_EXCHANGE,
-      'order.created',
-      event,
-    );
-    this.logger.log(`Published OrderCreated event for order ${event.orderId}`);
+    await this.safePublish('order.created', event, `Published OrderCreated event for order ${event.orderId}`);
   }
 
   async publishLowBalanceAlert(phoneNumber: string, currentBalance: number, currency: string) {
-    await this.amqpConnection.publish(USESHOP_EXCHANGE, 'wallet.low_balance', {
+    await this.safePublish('wallet.low_balance', {
       phoneNumber,
       currentBalance,
       currency,
       timestamp: new Date().toISOString(),
-    });
-    this.logger.log(`Published low balance alert for ${phoneNumber}`);
+    }, `Published low balance alert for ${phoneNumber}`);
   }
 
   // Example of how to publish to a specific queue directly if needed
   async sendToQueue(queue: string, payload: any) {
-    await this.amqpConnection.publish('', queue, payload, {
-      persistent: true,
-    });
+    this.logger.debug(`[NO-RABBIT] Suppressed sendToQueue ${queue}`);
   }
 
   /**
@@ -106,11 +96,6 @@ export class MessagingService {
    * Enables decoupled notifications, audit, and future workflows.
    */
   async publishOrderRefunded(event: OrderRefundedEvent) {
-    await this.amqpConnection.publish(
-      USESHOP_EXCHANGE,
-      'order.refunded',
-      event,
-    );
-    this.logger.log(`Published OrderRefunded event for order ${event.orderId}`);
+    await this.safePublish('order.refunded', event, `Published OrderRefunded event for order ${event.orderId}`);
   }
 }

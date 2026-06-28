@@ -4,22 +4,14 @@ import { PaymentsService } from './payments.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Wallet } from '../wallets/entities/wallet.entity';
 import { WalletsModule } from '../wallets/wallets.module';
-import { MessagingModule } from '../messaging/messaging.module';
 import { MonnifyWebhookController } from './monnify-webhook.controller';
-import { MonnifyPaymentProvider } from './providers/monnify-payment.provider';
-import { PAYMENT_PROVIDER } from './interfaces/payment-provider.interface';
 
 @Module({
-  imports: [HttpModule, TypeOrmModule.forFeature([Wallet]), WalletsModule, MessagingModule],
+  imports: [HttpModule, TypeOrmModule.forFeature([Wallet]), WalletsModule],
   controllers: [MonnifyWebhookController],
   providers: [
     PaymentsService,
-    MonnifyPaymentProvider,
-    {
-      provide: PAYMENT_PROVIDER,
-      useClass: MonnifyPaymentProvider,
-    },
   ],
-  exports: [PaymentsService, PAYMENT_PROVIDER],
+  exports: [PaymentsService],
 })
 export class PaymentsModule {}

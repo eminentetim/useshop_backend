@@ -4,6 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { WalletLedgerService } from '../wallets/wallet-ledger.service';
 import { MessagingService } from '../messaging/messaging.service';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Wallet } from '../wallets/entities/wallet.entity';
 
 describe('PaymentsService - Disbursements & Refunds', () => {
   let service: PaymentsService;
@@ -15,6 +17,7 @@ describe('PaymentsService - Disbursements & Refunds', () => {
         { provide: ConfigService, useValue: { get: jest.fn((k, d) => d) } },
         { provide: HttpService, useValue: { post: jest.fn() } },
         { provide: WalletLedgerService, useValue: {} },
+        { provide: getRepositoryToken(Wallet), useValue: {} },
         { provide: MessagingService, useValue: {} },
       ],
     }).compile();

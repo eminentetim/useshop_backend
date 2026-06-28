@@ -14,8 +14,9 @@ export class AiMetricsController {
     private readonly fraudCheckService: FraudCheckService,
     private readonly configService: ConfigService,
   ) {
+    const tracingEnabled = process.env.LANGCHAIN_TRACING_V2 === 'true';
     const apiKey = process.env.LANGCHAIN_API_KEY;
-    if (apiKey) {
+    if (tracingEnabled && apiKey) {
       this.langsmithClient = new Client({ apiKey });
     }
   }
